@@ -167,14 +167,16 @@ bill for it.
 
 =cut
 
-use JSON qw( decode_json encode_json );
+use JSON ();
 use LWP::UserAgent;
 
 use Moo;
 
-has $_ => ( is => 'rw', required => 1 ) for qw( un key  );
-has $_ => ( is => 'rw' ) for qw( fileopt filename );
+has [qw( un key )] => ( is => 'rw', required => 1 );
+has [qw( fileopt filename )] => ( is => 'rw' );
 has verbose => ( is => 'rw', default => sub { 1 } );
+
+has json => ( is => 'rw', builder => sub { JSON->new->utf8->convert_blessed( 1 )->canonical( 1 ) } );
 
 sub version   { __PACKAGE__->VERSION }
 sub _platform { "Perl" }
@@ -185,39 +187,37 @@ sub signup {
     return $class->new( un => undef, key => undef )->_json_from_post( 'https://plot.ly/apimkacct', $payload );
 }
 
-sub plot   { shift->_call_wrap( @_ ) }
-sub style  { shift->_call_wrap( @_ ) }
-sub layout { shift->_call_wrap( @_ ) }
+sub plot   { shift->_call_wrap( plot   => @_ ) }
+sub style  { shift->_call_wrap( style  => @_ ) }
+sub layout { shift->_call_wrap( layout => @_ ) }
 
-sub _makecall {
+sub _encode {
+    no warnings 'once';
+    local *PDL::TO_JSON = sub { $_[0]->unpdl };
+    return shift->json->encode(@_);
+}
+
+sub _decode { shift->json->decode(@_) }
+
+sub _make_payload {
     my ( $self, $args, $un, $key, $origin, %kwargs ) = @_;
-
-    my ( $json_args, $json_kwargs );
-    {
-        no warnings 'once';
-        local *PDL::TO_JSON = sub { $_[0]->unpdl };
-        my $convert = sub { JSON->new->utf8->convert_blessed( 1 )->canonical( 1 )->encode( $_[0] ) };
-        $json_args   = $convert->( $args );
-        $json_kwargs = $convert->( \%kwargs );
-    }
 
     my $payload = {
         platform => $self->_platform,
         version  => $self->version,
-        args     => $json_args,
+        args     => $self->_encode( $args ),
         un       => $un,
         key      => $key,
         origin   => $origin,
-        kwargs   => $json_kwargs,
+        kwargs   => $self->_encode( \%kwargs ),
     };
-    my $content = $self->_json_from_post( 'https://plot.ly/clientresp', $payload );
-    $self->filename( $content->{filename} ) if $content->{filename};
 
-    return $content;
+    return $payload;  
 }
 
 sub _call_wrap {
     my $self = shift;
+    my $origin = shift;
     my @args;
     push @args, shift @_ while ref $_[0];
     my %kwargs = @_;
@@ -227,10 +227,12 @@ sub _call_wrap {
     $kwargs{filename} ||= $self->filename;
     $kwargs{fileopt}  ||= $self->fileopt;
 
-    my $full_func_name = ( caller 1 )[3];
-    my ( $origin ) = reverse split "::", $full_func_name;
+    my $payload = $self->_make_payload( \@args, @login, $origin, %kwargs );
 
-    return $self->_makecall( \@args, @login, $origin, %kwargs );
+    my $content = $self->_json_from_post( 'https://plot.ly/clientresp', $payload );
+    $self->filename( $content->{filename} ) if $content->{filename};
+
+    return $content;
 }
 
 sub _json_from_post {
@@ -239,10 +241,10 @@ sub _json_from_post {
     my $response = LWP::UserAgent->new->post( $url, $payload );
     die $response if !$response->is_success;
 
-    my $content = decode_json $response->decoded_content;
+    my $content = $self->_decode($response->decoded_content);
 
     die $content->{error} if $content->{error};
-    print STDERR $content->{warning} if $content->{warning};
+    warn $content->{warning} if $content->{warning};
     print $content->{message} if $self->verbose and $content->{message};
 
     return $content;
